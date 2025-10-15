@@ -1,82 +1,100 @@
-name: Build
+name: Build SilentScreenshots (Rootless + Roothide)
 
 on:
   push:
-    branches: ["*"]
+    branches: [ master, main ]
   pull_request:
-    branches: ["*"]
-    
+    branches: [ master, main ]
+  workflow_dispatch:
+
 jobs:
-  build-rootless:
-    runs-on: macos-13
+  build:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        scheme: [rootless, roothide]
+    
+    name: Build ${{ matrix.scheme }}
+    
     steps:
-      - uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
-            
-      - uses: actions/checkout@main
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
-      - name: Checkout theos/theos
-        uses: actions/checkout@main
-        with:
-          repository: theos/theos
-          ref: master
-          submodules: recursive
-          path: theos
+    - name: Cache Theos
+      uses: actions/cache@v3
+      with:
+        path: ~/theos
+        key: ${{ runner.os }}-theos-${{ hashFiles('Makefile') }}
+        restore-keys: |
+          ${{ runner.os }}-theos-
 
-      - name: Checkout SDKs
-        uses: actions/checkout@main
-        with:
-          repository: xybp888/iOS-SDKs
-          ref: master
-          sparse-checkout: iPhoneOS15.5.sdk
-          path: theos/sdks
+    - name: Setup Theos
+      run: |
+        if [ ! -d ~/theos ]; then
+          echo "Installing Theos..."
+          git clone --recursive https://github.com/theos/theos.git ~/theos
+        fi
+        
+    - name: Setup iOS SDKs
+      run: |
+        export THEOS=~/theos
+        if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
+          echo "Downloading iOS SDKs..."
+          curl -LO https://github.com/theos/sdks/archive/master.zip
+          unzip -q master.zip
+          mkdir -p $THEOS/sdks
+          mv sdks-master/* $THEOS/sdks/
+          rm master.zip
+        fi
+        ls -la $THEOS/sdks/
 
-      - name: Install dependencies
-        run: brew install make xz ldid
+    - name: Install ldid
+      run: brew install ldid
 
-      - name: Build package (rootless)
-        run: THEOS=theos gmake clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+    - name: Build ${{ matrix.scheme }} Package
+      run: |
+        export THEOS=~/theos
+        make clean
+        make package THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} FINALPACKAGE=1
 
-      - name: Upload a Build Artifact (rootless)
-        uses: actions/upload-artifact@v3
-        with:
-          name: packages iphoneos-arm64 (rootless)
-          path: packages/*_iphoneos-arm64.deb
+    - name: Rename Package
+      run: |
+        mkdir -p output
+        PACKAGE_NAME=$(ls packages/*.deb | head -n 1)
+        cp "$PACKAGE_NAME" output/SilentScreenshots-${{ matrix.scheme }}.deb
 
-  build-rootful:
-    runs-on: macos-11
+    - name: Upload ${{ matrix.scheme }} Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: SilentScreenshots-${{ matrix.scheme }}
+        path: output/SilentScreenshots-${{ matrix.scheme }}.deb
+        if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
     steps:
-      - uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: '11.7'
-            
-      - uses: actions/checkout@main
+    - name: Download Rootless Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: SilentScreenshots-rootless
+        path: release/
 
-      - name: Checkout theos/theos
-        uses: actions/checkout@main
-        with:
-          repository: theos/theos
-          ref: master
-          submodules: recursive
-          path: theos
+    - name: Download Roothide Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: SilentScreenshots-roothide
+        path: release/
 
-      - name: Checkout SDKs
-        uses: actions/checkout@main
-        with:
-          repository: xybp888/iOS-SDKs
-          ref: master
-          sparse-checkout: iPhoneOS14.2.sdk
-          path: theos/sdks
-
-      - name: Install dependencies
-        run: brew install make xz ldid
-
-      - name: Build package (rootful)
-        run: THEOS=theos gmake clean package FINALPACKAGE=1
-
-      - name: Upload a Build Artifact (rootful)
-        uses: actions/upload-artifact@v3
-        with:
-          name: packages iphoneos-arm (rootful)
-          path: packages/*_iphoneos-arm.deb
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: release/*.deb
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
